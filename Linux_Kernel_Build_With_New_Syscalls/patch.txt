@@ -1,0 +1,441 @@
+diff -uNr Old/kernel/arch/x86/syscalls/syscall_32.tbl New/kernel/arch/x86/syscalls/syscall_32.tbl
+--- Old/kernel/arch/x86/syscalls/syscall_32.tbl	2017-06-17 10:44:31.000000000 -0700
++++ New/kernel/arch/x86/syscalls/syscall_32.tbl	2020-04-28 15:03:25.550100000 -0700
+@@ -365,3 +365,5 @@
+ 356	i386	memfd_create		sys_memfd_create
+ 357	i386	bpf			sys_bpf
+ 358	i386	execveat		sys_execveat			stub32_execveat
++359 i386    insdump			sys_insdump         
++360 i386    rmdump			sys_rmdump								
+\ No newline at end of file
+diff -uNr Old/kernel/lib/dynamic_dump_stack.c New/kernel/lib/dynamic_dump_stack.c
+--- Old/kernel/lib/dynamic_dump_stack.c	1969-12-31 17:00:00.000000000 -0700
++++ New/kernel/lib/dynamic_dump_stack.c	2020-04-30 20:11:01.093194000 -0700
+@@ -0,0 +1,305 @@
++#include "dynamic_dump_stack.h"
++
++
++// List that holds each kprobe_entry node added and statically initialized
++struct list_head kprobe_list;
++LIST_HEAD(kprobe_list);
++// The kprobe controlled by the syscall that indicates a process exited and in the prehandler associated kprobes will be unregistered
++struct kprobe* do_exit_kp;
++// Flag that makes sure the kprobes for exited processes are deleted and blocks new inserts if not satisfied
++static int verify_do_exit_kp = -1;
++// Global counter for the number of kprobes set and indicates the dumpid of each kprobe (incremented after each add)
++static unsigned int curr_dumpid = 1;
++// Flag that indicates unsigned int overflow (changes to 1 after first time and should not change again)
++static int limit = -1;
++
++
++//========================================================================================
++
++
++/*
++When do_exit is called by a process, look through the kprobe_entry list and unregister associated kprobes
++In case userspace forgot to unregister
++*/
++int Do_Exit_Pre_Handler(struct kprobe* probe, struct pt_regs* regs)
++{
++	struct kprobe_entry* cursor;
++	struct kprobe_entry* temp;
++	//printk("TRY: do_exit prehandler\n");
++
++	list_for_each_entry_safe(cursor, temp, &kprobe_list, list_ptr) 
++	{	
++		//  Remove kprobe if user forgot to
++		if(current->pid == cursor->pid) 
++		{
++			unregister_kprobe(&(cursor->kp));
++			list_del(&(cursor->list_ptr));
++			memset(cursor, 0, sizeof(struct kprobe_entry));
++			kfree(cursor);
++			printk("KINFO: Unregistered a kprobe in do_exit\n");
++		}		
++	}
++	return 0;
++}
++
++
++/*
++ Detects if a process exited and clears any associated kprobes
++ Every process that exits normally or otherwise should go to do_exit
++*/
++asmlinkage long keep_do_exit_kprobe_active(int i)
++{
++	int ver;
++
++	// Find do_exit symbol and its address
++	unsigned long do_exit_symbol_addr;
++	char* do_exit_symbol = "do_exit";
++	do_exit_symbol_addr = kallsyms_lookup_name(do_exit_symbol);
++	if(do_exit_symbol_addr == 0) 
++	{
++		printk("ERROR: symbol was not found\n");
++		return -1;
++	}
++
++	// Allocate global kprobe struct
++	do_exit_kp = kmalloc(sizeof(struct kprobe), GFP_KERNEL);
++	if(!do_exit_kp ) 
++	{
++		printk("ERROR: kmalloc\n");
++		return -1;
++	}
++	memset(do_exit_kp, 0, sizeof(struct kprobe));
++
++	// Fill in struct kprobe fields
++	do_exit_kp->pre_handler = Do_Exit_Pre_Handler;
++	do_exit_kp->addr = (kprobe_opcode_t*) do_exit_symbol_addr;
++
++	// Register do_exit kprobe
++	ver = register_kprobe(do_exit_kp);
++	if(ver < 0) 
++	{
++		printk("ERROR=%d: register_kprobe for do_exit\n", ver);
++		memset(do_exit_kp, 0, sizeof(struct kprobe));
++		kfree(do_exit_kp);
++	}
++
++	verify_do_exit_kp = ver;
++	printk("KINFO: Registered Do_Exit Kprobe \n");
++	return 0;
++}
++
++
++/*
++void __init myservice_init(void) {
++	INIT_LIST_HEAD(&kprobe_list);
++}
++*/
++
++
++
++
++
++
++//========================================================================================
++
++
++void Post_Handler(struct kprobe* kprobe, struct pt_regs* regs, unsigned long flags) {
++	return;
++}
++
++ int Pre_Handler(struct kprobe* probe, struct pt_regs* regs)
++{
++	struct kprobe_entry* cursor;
++	struct kprobe_entry* temp;
++	printk("KTRY: in normal pre_handler\n");
++	list_for_each_entry_safe(cursor, temp, &kprobe_list, list_ptr) 
++	{	// TODO: Remove kprobe
++		if((current->pid == cursor->pid) && (current->tgid == cursor->tgid))
++		{
++			printk("KTRY: dump_stack mode 0\n");
++			dump_stack();
++		}
++		else if((current->parent->pid == cursor->pid_parent) && (cursor->dumpmode == 1)) 
++		{
++			printk("KTRY: dump_stack mode 1\n");
++			dump_stack();
++		}
++		else if(cursor->dumpmode > 1 || cursor->dumpmode < 0) 
++		{
++			printk("KTRY: dump_stack mode >1\n");
++			dump_stack();
++		}
++		else {
++
++		}		
++	}
++	return 0;
++
++}
++
++
++
++/*
++symbol -> kernel .text symbol
++*/
++asmlinkage int sys_myservice(const char* symbol, dumpmode_t dumpmode) 
++{
++	struct kprobe_entry* to_add;
++	int ver;
++	long chk;
++	unsigned int dumpid_to_userspace;
++	unsigned long symbol_address;
++
++	// For iterating through list
++	struct kprobe_entry* cursor_u;
++	struct kprobe_entry* temp_u;
++
++	// Look up symbol
++	symbol_address = kallsyms_lookup_name(symbol);
++	if(symbol_address == 0) 
++	{
++		printk("ERROR: symbol was not found\n");
++		return -EINVAL;
++	}
++	
++	if( ((unsigned int) curr_dumpid) > 2000000000) 
++	{
++		// To prevent unsigned int overflow as user gets unsigned ints for dumpid 
++		if(limit == -1) {
++			// Only change curr_dumpid to 1 on first time overflow achieved
++			curr_dumpid = 1;
++		}
++		//limit = 1;
++		list_for_each_entry_safe(cursor_u, temp_u, &kprobe_list, list_ptr) 
++		{	
++			if(curr_dumpid == cursor_u->dumpid) 
++			{
++				// Remove kprobe with matching dumpid to prevent conflicts if one exists
++				unregister_kprobe(&(cursor_u->kp));
++				list_del(&(cursor_u->list_ptr));
++				memset(cursor_u, 0, sizeof(struct kprobe_entry));
++				kfree(cursor_u);
++				printk("KINFO: Unregistered a kprobe\n");
++			}		
++		}
++	}
++	
++	
++
++	// Search to see if process asked for kprobes in the past
++	// Important so the syscall can remove all process associated kprobes if userspace does not exit
++	if(verify_do_exit_kp < 0) 
++	{
++		chk = keep_do_exit_kprobe_active(1);
++		if(chk < 0) {
++			printk("ERROR: do_exit kprobe was not set in init, cannot allocate kprobe\n");
++			return -1;
++		}
++		printk("KINFO: do_exit probe setup\n");
++		
++	}
++
++	// Allocate space for kprobe_entry
++	to_add = kmalloc(sizeof(struct kprobe_entry), GFP_KERNEL);
++	if(!to_add) 
++	{
++		printk("ERROR: kmalloc for kprobe_entry\n");
++		return -1;
++	}
++	memset(to_add, 0, sizeof(struct kprobe_entry));
++
++	// Fill in kprobe fields
++	to_add->kp.pre_handler = Pre_Handler;
++	to_add->kp.post_handler = Post_Handler;
++	to_add->kp.addr = (kprobe_opcode_t*) symbol_address;
++
++	// Add pids to kprobe entry
++	to_add->pid = current->pid;
++	to_add->pid_parent = current->parent->pid;
++	to_add->tgid = current->tgid;
++
++	// Add other fields
++	to_add->dumpmode = dumpmode;
++	to_add->symbol_address = symbol_address;
++	to_add->dumpid = curr_dumpid;
++
++	// Register kprobe
++	ver = register_kprobe(&(to_add->kp));
++	if(ver < 0) 
++	{
++		printk("ERROR=%d: register_kprobe\n", ver);
++		memset(to_add, 0, sizeof(struct kprobe_entry));
++		kfree(to_add);
++		return -EINVAL;
++	}
++	printk("KINFO: Registered kprobe\n");
++
++	// Add kprobe entry to global list
++	list_add(&(to_add->list_ptr), &(kprobe_list));
++
++	// Return the dumpidback to userspace and update the curr_dumpid counter for next insert
++	dumpid_to_userspace = curr_dumpid;
++	curr_dumpid += 1;
++	printk("KVAR: Dumpid = %u\n", (unsigned int)dumpid_to_userspace);
++	return (int)dumpid_to_userspace;
++}
++
++SYSCALL_DEFINE2(insdump, const char __user*, symbolname, dumpmode_t, mode) 
++{
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++	//struct dumpmode_t dumpmode;
++	//dumpmode.mode = mode;
++	return sys_myservice(symbolname, mode);
++#else
++	//return -EINVAL;
++	printk("KINFO: Systemcall insdump was not configured with CONFIG_DEBUG\n");
++
++#endif
++
++}
++
++
++//========================================================================================
++asmlinkage long sys_myservice_clear(unsigned int dumpid) 
++{
++	struct kprobe_entry* cursor;
++	struct kprobe_entry* temp;
++	bool did_find_entry = false;
++
++	list_for_each_entry_safe(cursor, temp, &kprobe_list, list_ptr) 
++	{
++		// Remove kprobe with matching dumpid
++		if((current->pid == cursor->pid) && (cursor->dumpid == dumpid)) 
++		{
++			did_find_entry = true;
++			unregister_kprobe(&(cursor->kp));
++			list_del(&(cursor->list_ptr));
++			memset(cursor, 0, sizeof(struct kprobe_entry));
++			kfree(cursor);
++			printk("KINFO: Found entry in sys_myservice_clear\n");
++		}
++			
++	}
++	if(did_find_entry==true) 
++	{
++		return 0;
++	}
++	else 
++	{
++		return -EINVAL;
++	}
++}
++
++
++SYSCALL_DEFINE1(rmdump, unsigned int, dumpid) 
++{
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++	return sys_myservice_clear(dumpid);
++#else
++	//return -EINVAL;
++	printk("KINFO: Systemcall rmdump was not configured with CONFIG_DEBUG\n");
++#endif
++
++}
++
++
+diff -uNr Old/kernel/lib/dynamic_dump_stack.h New/kernel/lib/dynamic_dump_stack.h
+--- Old/kernel/lib/dynamic_dump_stack.h	1969-12-31 17:00:00.000000000 -0700
++++ New/kernel/lib/dynamic_dump_stack.h	2020-04-30 14:20:20.664341000 -0700
+@@ -0,0 +1,56 @@
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/unistd.h>
++#include <linux/time.h>
++#include <linux/fs.h>
++#include <linux/list.h>
++#include <linux/kprobes.h>
++#include <linux/syscalls.h>
++#include <linux/slab.h>
++#include <linux/linkage.h>
++#include <linux/sched.h>
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/fs.h>
++#include <linux/cdev.h>
++#include <linux/types.h>
++#include <linux/slab.h>
++#include <asm/uaccess.h>
++#include <linux/string.h>
++#include <linux/device.h>
++#include <linux/jiffies.h>
++
++#include<linux/init.h>
++#include<linux/moduleparam.h>
++
++
++/*
++struct dumpmode_t {
++	unsigned int mode;
++};
++*/
++
++typedef unsigned int dumpmode_t;
++
++/*
++TODO: ADD this and replace the other dumpmode_t
++typedef unsigned int dumpmode_t;
++*/
++
++struct kprobe_entry {
++	pid_t pid;
++	pid_t pid_parent;
++	pid_t tgid;
++	dumpmode_t dumpmode;
++	unsigned long symbol_address;
++	unsigned int dumpid;
++	struct kprobe kp;
++	struct list_head list_ptr;
++
++};
++
++
++//void __init myservice_init(void)
+\ No newline at end of file
+diff -uNr Old/kernel/lib/Kconfig.debug New/kernel/lib/Kconfig.debug
+--- Old/kernel/lib/Kconfig.debug	2017-06-17 10:44:58.000000000 -0700
++++ New/kernel/lib/Kconfig.debug	2020-04-28 17:53:06.064360000 -0700
+@@ -119,7 +119,7 @@
+ 
+ config DEBUG_INFO
+ 	bool "Compile the kernel with debug info"
+-	depends on DEBUG_KERNEL && !COMPILE_TEST
++	default y
+ 	help
+           If you say Y here the resulting kernel image will include
+ 	  debugging info resulting in a larger kernel image.
+@@ -130,6 +130,15 @@
+ 
+ 	  If unsure, say N.
+ 
++
++config DYNAMIC_DUMP_STACK
++	bool "Configure dynamic dump stack syscall"
++	default y
++
++	help
++		Enables two syscalls, insdump and rmdump for dumping kernel stack
++
++
+ config DEBUG_INFO_REDUCED
+ 	bool "Reduce debugging information"
+ 	depends on DEBUG_INFO
+@@ -363,6 +372,7 @@
+ 
+ config DEBUG_KERNEL
+ 	bool "Kernel debugging"
++	default Y
+ 	help
+ 	  Say Y here if you are developing drivers or trying to debug and
+ 	  identify kernel problems.
+diff -uNr Old/kernel/lib/Makefile New/kernel/lib/Makefile
+--- Old/kernel/lib/Makefile	2017-06-17 10:44:58.000000000 -0700
++++ New/kernel/lib/Makefile	2020-04-27 16:09:54.280421000 -0700
+@@ -22,6 +22,9 @@
+ lib-y	+= kobject.o klist.o
+ obj-y	+= lockref.o
+ 
++# new
++
++
+ obj-y += bcd.o div64.o sort.o parser.o halfmd4.o debug_locks.o random32.o \
+ 	 bust_spinlocks.o hexdump.o kasprintf.o bitmap.o scatterlist.o \
+ 	 gcd.o lcm.o list_sort.o uuid.o flex_array.o iovec.o clz_ctz.o \
+@@ -62,6 +65,11 @@
+   lib-y += dec_and_lock.o
+ endif
+ 
++# dump stack
++
++obj-$(CONFIG_DYNAMIC_DUMP_STACK) += dynamic_dump_stack.o
++
++
+ obj-$(CONFIG_BITREVERSE) += bitrev.o
+ obj-$(CONFIG_RATIONAL)	+= rational.o
+ obj-$(CONFIG_CRC_CCITT)	+= crc-ccitt.o
