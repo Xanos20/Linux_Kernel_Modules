@@ -1,0 +1,34 @@
+make EXTRA_FLAGS= ARCH=x86 CROSS_COMPILE=i586-poky-linux- -C /opt/iot-devkit/1.7.2/sysroots/i586-poky-linux/usr/src/kernel M=/home/linux/CSE530/Part1 modules
+make[1]: Entering directory '/opt/iot-devkit/1.7.2/sysroots/i586-poky-linux/usr/src/kernel'
+  CC [M]  /home/linux/CSE530/Part1/HCSR_Sensor_Driver.o
+In file included from include/linux/list.h:8:0,
+                 from /home/linux/CSE530/Part1/hcsr.h:2,
+                 from /home/linux/CSE530/Part1/HCSR_Sensor_Driver.c:3:
+/home/linux/CSE530/Part1/HCSR_Sensor_Driver.c: In function 'work_function':
+include/linux/kernel.h:799:48: warning: initialization from incompatible pointer type
+  const typeof( ((type *)0)->member ) *__mptr = (ptr); \
+                                                ^
+/home/linux/CSE530/Part1/HCSR_Sensor_Driver.c:674:15: note: in expansion of macro 'container_of'
+  hcsr_devps = container_of(work, struct hcsr_dev, my_work);
+               ^
+  Building modules, stage 2.
+  MODPOST 1 modules
+  LD [M]  /home/linux/CSE530/Part1/HCSR_Sensor_Driver.ko
+make[1]: Leaving directory '/opt/iot-devkit/1.7.2/sysroots/i586-poky-linux/usr/src/kernel'
+i586-poky-linux-gcc -o main main.c -Wall -g --sysroot=/opt/iot-devkit/1.7.2/sysroots/i586-poky-linux/
+
+
+
+
+Entering directory '/opt/iot-devkit/1.7.2/sysroots/i586-poky-linux/usr/src/kernel'
+  CC [M]  /home/linux/CSE530/Part1/HCSR_Sensor_Driver.o
+In file included from include/linux/list.h:8:0,
+                 from /home/linux/CSE530/Part1/hcsr.h:2,
+                 from /home/linux/CSE530/Part1/HCSR_Sensor_Driver.c:3:
+/home/linux/CSE530/Part1/HCSR_Sensor_Driver.c: In function 'work_function':
+include/linux/kernel.h:799:48: warning: initialization from incompatible pointer type
+  const typeof( ((type *)0)->member ) *__mptr = (ptr); \
+                                                ^
+/home/linux/CSE530/Part1/HCSR_Sensor_Driver.c:676:15: note: in expansion of macro 'container_of'
+  hcsr_devps = container_of(work, struct hcsr_dev, my_work);
+               ^
