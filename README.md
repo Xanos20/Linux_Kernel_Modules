@@ -1,3 +1,3 @@
 # Linux_Kernel_Modules
 
-Code will be added soon
+Linux Kernel Modules for the Intel Galileo Gen 2 board embedded device
